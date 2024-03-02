@@ -5,7 +5,7 @@ import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import {StorageSlot} from "@openzeppelin/contracts/utils/StorageSlot.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {AccessControlUpgradeable} from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
-import {Lootery} from "./Lootery.sol";
+import {LooteryETH} from "./core/LooteryETH.sol";
 
 /// @title LooteryFactory
 /// @notice Launch your own lottos to fund your Troop!
@@ -113,7 +113,7 @@ contract LooteryFactory is UUPSUpgradeable, AccessControlUpgradeable {
             looteryMasterCopy,
             salt
         );
-        Lootery(looteryProxy).init(
+        LooteryETH(looteryProxy).init(
             msg.sender,
             name_,
             symbol_,

@@ -1,5 +1,10 @@
 [
   {
+    "inputs": [],
+    "stateMutability": "nonpayable",
+    "type": "constructor"
+  },
+  {
     "inputs": [
       {
         "internalType": "address",
@@ -904,6 +909,59 @@
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "owner_",
+        "type": "address"
+      },
+      {
+        "internalType": "string",
+        "name": "name_",
+        "type": "string"
+      },
+      {
+        "internalType": "string",
+        "name": "symbol_",
+        "type": "string"
+      },
+      {
+        "internalType": "uint8",
+        "name": "numPicks_",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint8",
+        "name": "maxBallValue_",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint256",
+        "name": "gamePeriod_",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "ticketPrice_",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "communityFeeBps_",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "randomiser_",
+        "type": "address"
+      }
+    ],
+    "name": "init",
+    "outputs": [],
+    "stateMutability": "payable",
     "type": "function"
   },
   {

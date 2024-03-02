@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.23;
 
-import {FeistelShuffleOptimised} from "./lib/FeistelShuffleOptimised.sol";
-import {Sort} from "./lib/Sort.sol";
+import {FeistelShuffleOptimised} from "../lib/FeistelShuffleOptimised.sol";
+import {Sort} from "../lib/Sort.sol";
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {ERC721Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC721/ERC721Upgradeable.sol";
 import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import {IRandomiserCallback} from "./interfaces/IRandomiserCallback.sol";
-import {IRNGesusReloaded} from "./interfaces/IRNGesusReloaded.sol";
+import {IRandomiserCallback} from "../interfaces/IRandomiserCallback.sol";
+import {IRNGesusReloaded} from "../interfaces/IRNGesusReloaded.sol";
 
 /// @title Lootery
 /// @notice Lotto the ultimate
-contract Lootery is
+abstract contract Lootery is
     IRandomiserCallback,
     Initializable,
     OwnableUpgradeable,
@@ -66,7 +66,7 @@ contract Lootery is
     uint256 public communityFeeBps;
 
     /// @dev Current token id
-    uint256 private currentTokenId;
+    uint256 internal currentTokenId;
     /// @notice State of the game
     GameState public gameState;
     /// @notice Monotonically increasing game id
@@ -84,8 +84,8 @@ contract Lootery is
     /// @notice Game id => pick identity => tokenIds
     mapping(uint256 gameId => mapping(uint256 id => uint256[]))
         public tokenByPickIdentity;
-    /// @notice Accrued community fee share (wei)
-    uint256 public accruedCommunityFees;
+    /// @notice Accrued fees (in wei or whatever ERC-20 token precision)
+    uint256 public accruedFees;
 
     event TicketPurchased(
         uint256 indexed gameId,
@@ -101,13 +101,11 @@ contract Lootery is
         address whomst,
         uint256 value
     );
-    event ConsolationClaimed(
-        uint256 indexed tokenId,
-        uint256 indexed gameId,
-        address whomst,
-        uint256 value
-    );
     event DrawSkipped(uint256 indexed gameId);
+    event OperationalFundsAdded(uint256 amount);
+    event OperationalFundsConsumed(uint256 amount);
+    event FeesEarned(uint256 amount);
+    event FeesClaimed(uint256 amount);
 
     error TransferFailure(address to, uint256 value, bytes reason);
     error InvalidNumPicks(uint256 numPicks);
@@ -129,13 +127,10 @@ contract Lootery is
     error JackpotOverflow(uint256 value);
     error TicketsSoldOverflow(uint256 value);
     error InsufficientOperationalFunds(uint256 have, uint256 want);
-
-    constructor() {
-        _disableInitializers();
-    }
+    error ClaimWindowMissed(uint256 tokenId);
 
     /// @notice Initialisoooooooor
-    function init(
+    function __Lootery_init(
         address owner_,
         string memory name_,
         string memory symbol_,
@@ -145,7 +140,7 @@ contract Lootery is
         uint256 ticketPrice_,
         uint256 communityFeeBps_,
         address randomiser_
-    ) public payable initializer {
+    ) public onlyInitializing {
         __Ownable_init(owner_);
         __ERC721_init(name_, symbol_);
 
@@ -171,29 +166,28 @@ contract Lootery is
         }
         randomiser = randomiser_;
 
-        // Seed the jackpot
-        if (msg.value > type(uint128).max) {
-            revert JackpotOverflow(msg.value);
-        }
         gameData[0] = Game({
-            jackpot: uint128(msg.value),
+            jackpot: 0,
             ticketsSold: 0,
             // The first game starts straight away
             startedAt: uint64(block.timestamp)
         });
     }
 
+    function _token() internal view virtual returns (address);
+
+    /// @notice Address of token used for purchase & payout
+    function token() public view virtual returns (address) {
+        return _token();
+    }
+
+    /// @notice Handler for receiving ETH or tokens and topping up the jackpot
+    /// @dev If receiving ETH, take amount from msg.value
+    function _seedJackpot(uint128 amount) internal virtual;
+
     /// @notice Seed the jackpot
-    function seedJackpot() external payable {
-        // We allow seeding jackpot during purchase phase only, so we don't
-        // have to fuck around with accounting
-        if (gameState != GameState.Purchase) {
-            revert UnexpectedState(gameState, GameState.Purchase);
-        }
-        if (msg.value > type(uint128).max) {
-            revert JackpotOverflow(msg.value);
-        }
-        gameData[currentGameId].jackpot += uint128(msg.value);
+    function seedJackpot(uint128 amount) external payable {
+        _seedJackpot(amount);
     }
 
     /// @notice Compute the identity of an ordered set of numbers
@@ -207,25 +201,25 @@ contract Lootery is
         return uint256(keccak256(packed));
     }
 
+    /// @dev Handle payment either directly in ETH, or ERC-20, or whatever else
+    /// @dev Handle fee accounting here too!
+    /// @dev Must revert if payment fails for whatever reason
+    function _handlePayment(
+        Ticket[] calldata tickets
+    ) internal virtual returns (uint256 jackpotShare, uint256 feeShare);
+
     /// @notice Purchase a ticket
     /// @param tickets Tickets! Tickets!
     function purchase(Ticket[] calldata tickets) external payable {
         uint256 ticketsCount = tickets.length;
-        uint256 totalPrice = ticketPrice * ticketsCount;
-        if (msg.value != totalPrice) {
-            revert IncorrectPaymentAmount(msg.value, totalPrice);
-        }
+        (uint256 jackpotShare, uint256 feeShare) = _handlePayment(tickets);
+        emit FeesEarned(feeShare);
 
         uint256 gameId = currentGameId;
-
-        // Handle fee splits
-        uint256 communityFeeShare = (msg.value * communityFeeBps) / 10000;
-        uint256 jackpotShare = msg.value - communityFeeShare;
-        if (jackpotShare > type(uint128).max) {
+        Game memory game = gameData[currentGameId];
+        if (game.jackpot + jackpotShare > type(uint128).max) {
             revert JackpotOverflow(jackpotShare);
         }
-        accruedCommunityFees += communityFeeShare;
-        Game memory game = gameData[currentGameId];
         if (uint256(game.ticketsSold) + ticketsCount > type(uint64).max) {
             revert TicketsSoldOverflow(
                 uint256(game.ticketsSold) + ticketsCount
@@ -264,6 +258,7 @@ contract Lootery is
             uint256 tokenId = startingTokenId + t;
             uint256 pickId = computePickIdentity(picks);
             tokenIdToTicket[tokenId] = pickId;
+            tokenIdToGameId[tokenId] = currentGameId;
             _safeMint(whomst, tokenId);
 
             // Account for this pick set
@@ -313,13 +308,7 @@ contract Lootery is
         uint256 requestPrice = IRNGesusReloaded(randomiser).getRequestPrice(
             500_000
         );
-        if (accruedCommunityFees < requestPrice) {
-            revert InsufficientOperationalFunds(
-                accruedCommunityFees,
-                requestPrice
-            );
-        }
-        accruedCommunityFees -= requestPrice;
+        _consumeOperationalFunds(requestPrice);
         // VRF call
         uint256 requestId = IRNGesusReloaded(randomiser).requestRandomness{
             value: requestPrice
@@ -374,7 +363,13 @@ contract Lootery is
 
         // Ready for next game
         gameState = GameState.Purchase;
-        gameData[gameId + 1].startedAt = uint64(block.timestamp);
+
+        // Set up next game; roll over jackpot
+        gameData[gameId + 1] = Game({
+            jackpot: gameData[gameId].jackpot,
+            ticketsSold: 0,
+            startedAt: uint64(block.timestamp)
+        });
     }
 
     /// @notice Claim a share of the jackpot with a winning ticket
@@ -389,6 +384,11 @@ contract Lootery is
 
         // Check winning balls from game
         uint256 gameId = tokenIdToGameId[tokenId];
+        // Can only claim winnings from the last game
+        if (gameId != currentGameId - 1) {
+            revert ClaimWindowMissed(tokenId);
+        }
+
         uint256 winningPickId = winningPickIds[gameId];
         uint256 ticketPickId = tokenIdToTicket[tokenId];
 
@@ -396,22 +396,14 @@ contract Lootery is
         Game memory game = gameData[gameId];
         uint256 jackpot = game.jackpot;
         uint256 numWinners = tokenByPickIdentity[gameId][winningPickId].length;
-        if (numWinners == 0) {
-            // No jackpot winners!
-            // Jackpot is shared between all tickets
-            // Invariant: `ticketsSold[gameId] > 0`
-            uint256 prizeShare = jackpot / gameData[gameId].ticketsSold;
-            _transferOrBust(whomst, prizeShare);
-            emit ConsolationClaimed(tokenId, gameId, whomst, prizeShare);
-            return;
-        }
-
         if (winningPickId == ticketPickId) {
             // This ticket did have the winning numbers
             // Transfer share of jackpot to ticket holder
             // NB: `numWinners` != 0 in this path
             uint256 prizeShare = jackpot / numWinners;
             _transferOrBust(whomst, prizeShare);
+            // Decrease current game's jackpot by the claimed amount
+            gameData[currentGameId].jackpot -= uint128(prizeShare);
             emit WinningsClaimed(tokenId, gameId, whomst, prizeShare);
             return;
         }
@@ -419,27 +411,33 @@ contract Lootery is
         revert NoWin(ticketPickId, winningPickId);
     }
 
-    /// @notice Accrued community fees are used for operational activities such
-    ///     as requesting random numbers. Use this function to top it up.
-    function addOperationalFunds() external payable {
-        accruedCommunityFees += msg.value;
+    /// @dev Hook upon consuming operational funds (for accounting)
+    function _consumeOperationalFunds(uint256 amount) internal virtual;
+
+    /// @notice Use this function to withdraw operational funds
+    function withdrawOperationalFunds(uint256 amount) external onlyOwner {
+        _consumeOperationalFunds(amount);
+        emit OperationalFundsConsumed(amount);
     }
 
-    /// @notice Withdraw accrued community fees
-    function withdrawAccruedFees() external onlyOwner {
-        uint256 totalAccrued = accruedCommunityFees;
-        accruedCommunityFees = 0;
-        _transferOrBust(msg.sender, totalAccrued);
+    function _addOperationalFunds(uint256 amount) internal virtual;
+
+    /// @notice Use this function to top up operational funds
+    function addOperationalFunds(uint256 amount) external payable {
+        _addOperationalFunds(amount);
+        emit OperationalFundsAdded(amount);
     }
 
     /// @notice Transfer via raw call; revert on failure
     /// @param to Address to transfer to
     /// @param value Value (in wei) to transfer
-    function _transferOrBust(address to, uint256 value) internal {
-        (bool success, bytes memory retval) = to.call{value: value}("");
-        if (!success) {
-            revert TransferFailure(to, value, retval);
-        }
-        emit Transferred(to, value);
+    function _transferOrBust(address to, uint256 value) internal virtual;
+
+    /// @notice Withdraw accrued fees
+    function withdrawAccruedFees() external onlyOwner {
+        uint256 totalAccrued = accruedFees;
+        accruedFees = 0;
+        _transferOrBust(msg.sender, totalAccrued);
+        emit FeesClaimed(totalAccrued);
     }
 }

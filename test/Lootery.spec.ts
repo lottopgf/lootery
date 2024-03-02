@@ -2,6 +2,7 @@ import { ethers } from 'hardhat'
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers'
 import {
     Lootery,
+    LooteryETH__factory,
     LooteryFactory,
     LooteryFactory__factory,
     Lootery__factory,
@@ -24,7 +25,7 @@ describe('Lootery', () => {
     beforeEach(async () => {
         ;[deployer, bob, alice] = await ethers.getSigners()
         mockRandomiser = await new MockRandomiser__factory(deployer).deploy()
-        const looteryImpl = await new Lootery__factory(deployer).deploy()
+        const looteryImpl = await new LooteryETH__factory(deployer).deploy()
         factory = await deployProxy({
             deployer,
             implementation: LooteryFactory__factory,
@@ -60,7 +61,7 @@ describe('Lootery', () => {
         )
 
         // Allow seeding jackpot
-        await lotto.seedJackpot({
+        await lotto.seedJackpot(parseEther('10'), {
             value: parseEther('10'),
         })
         expect(await ethers.provider.getBalance(await lotto.getAddress())).to.eq(parseEther('10'))
@@ -112,52 +113,61 @@ describe('Lootery', () => {
         expect(await ethers.provider.getBalance(bob.address)).to.eq(balanceBefore + jackpot)
 
         // Withdraw accrued fees
-        const accruedFees = await lotto.accruedCommunityFees()
+        const accruedFees = await lotto.accruedFees()
         expect(accruedFees).to.eq(parseEther('0.049')) // 0.05 - vrfRequestPrice
         await expect(lotto.withdrawAccruedFees()).to.emit(lotto, 'Transferred')
-        expect(await lotto.accruedCommunityFees()).to.eq(0)
+        expect(await lotto.accruedFees()).to.eq(0)
     })
 
-    it('should let participants claim equal share if nobody won', async () => {
+    it('should rollover jackpot to next round if noone has won', async () => {
         const gamePeriod = 1n * 60n * 60n
         async function deploy() {
-            return deployLotto({
+            return deployLoooteryETH({
                 deployer,
                 gamePeriod,
             })
         }
         const { lotto, fastForwardAndDraw } = await loadFixture(deploy)
 
-        const { tokenId: bobTokenId } = await purchaseTicket(lotto, bob.address, [1, 2, 3, 4, 5])
-        const { tokenId: aliceTokenId } = await purchaseTicket(
-            lotto,
-            alice.address,
-            [1, 2, 3, 4, 6],
+        const winningTicket = [3n, 11n, 22n, 29n, 42n]
+
+        const { tokenId: bobTokenId } = await purchaseTicket(lotto, bob.address, winningTicket)
+        const { tokenId: aliceTokenId } = await purchaseTicket(lotto, alice.address, winningTicket)
+
+        await fastForwardAndDraw(6942069420n)
+
+        // Current jackpot + 2 tickets
+        expect((await lotto.gameData(1)).jackpot).to.be.eq(parseEther('10.1'))
+
+        // Alice claims prize
+        await lotto.connect(deployer).claimWinnings(aliceTokenId)
+
+        // Current jackpot is reduced
+        expect((await lotto.gameData(1)).jackpot).to.be.eq(parseEther('5.05'))
+
+        // Balance is half of jackpot + 2 tickets - VRF request cost
+        expect(await ethers.provider.getBalance(await lotto.getAddress())).to.be.eq(
+            parseEther('5.149'),
         )
-        const gameId = await lotto.tokenIdToGameId(bobTokenId)
 
-        await fastForwardAndDraw(6942069320n)
+        // Advance 1 round
+        await time.increase(gamePeriod)
+        await lotto.draw()
 
-        const { jackpot } = await lotto.gameData(gameId)
-        const prizeShare = jackpot / 2n
-        const bobBalanceBefore = await ethers.provider.getBalance(bob.address)
-        expect(await lotto.claimWinnings(bobTokenId))
-            .to.emit(lotto, 'ConsolationClaimed')
-            .withArgs(bobTokenId, gameId, bob.address, prizeShare)
-        expect(await ethers.provider.getBalance(bob.address)).to.eq(bobBalanceBefore + prizeShare)
-        const aliceBalanceBefore = await ethers.provider.getBalance(alice.address)
-        expect(await lotto.claimWinnings(aliceTokenId))
-            .to.emit(lotto, 'ConsolationClaimed')
-            .withArgs(aliceTokenId, gameId, bob.address, prizeShare)
-        expect(await ethers.provider.getBalance(alice.address)).to.eq(
-            aliceBalanceBefore + prizeShare,
+        // Half of round 1 jackpot
+        expect((await lotto.gameData(2)).jackpot).to.be.eq(parseEther('5.05'))
+
+        // Bob can't claim anymore
+        await expect(lotto.claimWinnings(bobTokenId)).to.be.revertedWithCustomError(
+            lotto,
+            'ClaimWindowMissed',
         )
     })
 
     it('should run games continuously, as long as gamePeriod has elapsed', async () => {
         const gamePeriod = 1n * 60n * 60n
         async function deploy() {
-            return deployLotto({
+            return deployLoooteryETH({
                 deployer,
                 gamePeriod,
             })
@@ -186,7 +196,7 @@ function keccak(balls: bigint[]) {
     )
 }
 
-async function deployLotto({
+async function deployLoooteryETH({
     deployer,
     gamePeriod,
 }: {
@@ -197,8 +207,8 @@ async function deployLotto({
     const mockRandomiser = await new MockRandomiser__factory(deployer).deploy()
     const lotto = await deployProxy({
         deployer,
-        implementation: Lootery__factory,
-        initData: await Lootery__factory.createInterface().encodeFunctionData('init', [
+        implementation: LooteryETH__factory,
+        initData: await LooteryETH__factory.createInterface().encodeFunctionData('init', [
             deployer.address,
             'Lotto',
             'LOTTO',
@@ -211,7 +221,7 @@ async function deployLotto({
         ]),
     })
     // Seed initial jackpot with 10 ETH
-    await lotto.seedJackpot({
+    await lotto.seedJackpot(parseEther('10'), {
         value: parseEther('10'),
     })
 
