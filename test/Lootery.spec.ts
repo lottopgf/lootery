@@ -119,7 +119,7 @@ describe('Lootery', () => {
         expect(await lotto.accruedFees()).to.eq(0)
     })
 
-    it('should let participants claim equal share if nobody won', async () => {
+    it('should rollover jackpot to next round if noone has won', async () => {
         const gamePeriod = 1n * 60n * 60n
         async function deploy() {
             return deployLoooteryETH({
@@ -129,33 +129,38 @@ describe('Lootery', () => {
         }
         const { lotto, fastForwardAndDraw } = await loadFixture(deploy)
 
-        const { tokenId: bobTokenId } = await purchaseTicket(
-            lotto as Lootery,
-            bob.address,
-            [1, 2, 3, 4, 5],
-        )
-        const { tokenId: aliceTokenId } = await purchaseTicket(
-            lotto as Lootery,
-            alice.address,
-            [1, 2, 3, 4, 6],
-        )
-        const gameId = await lotto.tokenIdToGameId(bobTokenId)
+        const winningTicket = [3n, 11n, 22n, 29n, 42n]
 
-        await fastForwardAndDraw(6942069320n)
+        const { tokenId: bobTokenId } = await purchaseTicket(lotto, bob.address, winningTicket)
+        const { tokenId: aliceTokenId } = await purchaseTicket(lotto, alice.address, winningTicket)
 
-        const { jackpot } = await lotto.gameData(gameId)
-        const prizeShare = jackpot / 2n
-        const bobBalanceBefore = await ethers.provider.getBalance(bob.address)
-        expect(await lotto.claimWinnings(bobTokenId))
-            .to.emit(lotto, 'ConsolationClaimed')
-            .withArgs(bobTokenId, gameId, bob.address, prizeShare)
-        expect(await ethers.provider.getBalance(bob.address)).to.eq(bobBalanceBefore + prizeShare)
-        const aliceBalanceBefore = await ethers.provider.getBalance(alice.address)
-        expect(await lotto.claimWinnings(aliceTokenId))
-            .to.emit(lotto, 'ConsolationClaimed')
-            .withArgs(aliceTokenId, gameId, bob.address, prizeShare)
-        expect(await ethers.provider.getBalance(alice.address)).to.eq(
-            aliceBalanceBefore + prizeShare,
+        await fastForwardAndDraw(6942069420n)
+
+        // Current jackpot + 2 tickets
+        expect((await lotto.gameData(1)).jackpot).to.be.eq(parseEther('10.1'))
+
+        // Alice claims prize
+        await lotto.connect(deployer).claimWinnings(aliceTokenId)
+
+        // Current jackpot is reduced
+        expect((await lotto.gameData(1)).jackpot).to.be.eq(parseEther('5.05'))
+
+        // Balance is half of jackpot + 2 tickets - VRF request cost
+        expect(await ethers.provider.getBalance(await lotto.getAddress())).to.be.eq(
+            parseEther('5.149'),
+        )
+
+        // Advance 1 round
+        await time.increase(gamePeriod)
+        await lotto.draw()
+
+        // Half of round 1 jackpot
+        expect((await lotto.gameData(2)).jackpot).to.be.eq(parseEther('5.05'))
+
+        // Bob can't claim anymore
+        await expect(lotto.claimWinnings(bobTokenId)).to.be.revertedWithCustomError(
+            lotto,
+            'ClaimWindowMissed',
         )
     })
 
